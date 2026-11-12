@@ -20,31 +20,40 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - uses: android-actions/setup-android@v3
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Find project
+      - name: Unzip project
         id: project
         run: |
-          F=$(find . -name settings.gradle.kts -print -quit)
-          test -n "$F"
-          echo "dir=$(dirname "$F")" >> "$GITHUB_OUTPUT"
+          set -e
+          ZIP=$(find . -maxdepth 1 -name '*.zip' -print -quit)
+          test -n "$ZIP"
+          mkdir -p /tmp/rentvpn
+          unzip -q -o "$ZIP" -d /tmp/rentvpn
+          SETTINGS=$(find /tmp/rentvpn -name settings.gradle.kts -print -quit)
+          test -n "$SETTINGS"
+          echo "dir=$(dirname "$SETTINGS")" >> "$GITHUB_OUTPUT"
 
-      - name: Download Xray
+      - name: Download Xray library
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "${{ steps.project.outputs.dir }}/app/libs"
+          set -e
+          LIB="${{ steps.project.outputs.dir }}/app/libs"
+          mkdir -p "$LIB"
           gh release download --repo 2dust/AndroidLibXrayLite \
-            --pattern '*.aar' \
-            --dir "${{ steps.project.outputs.dir }}/app/libs"
-          A=$(find "${{ steps.project.outputs.dir }}/app/libs" -name '*.aar' | head -1)
+            --pattern '*.aar' --dir "$LIB" --clobber
+          A=$(find "$LIB" -name '*.aar' -print -quit)
           test -n "$A"
-          mv "$A" "${{ steps.project.outputs.dir }}/app/libs/libv2ray.aar"
+          mv "$A" "$LIB/libv2ray.aar"
 
       - name: Build APK
         run: |
+          set -e
           gradle -p "${{ steps.project.outputs.dir }}" :app:assembleDebug
           cp "${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" RentVPN.apk
 
@@ -53,7 +62,8 @@ jobs:
           name: RENT-VPN-debug-apk
           path: RentVPN.apk
 
-      - uses: softprops/action-gh-release@v2
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: rentvpn-build-${{ github.run_number }}
           name: RentVPN build ${{ github.run_number }}
