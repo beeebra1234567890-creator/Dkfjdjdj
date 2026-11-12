@@ -14,67 +14,114 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Java 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Gradle 8.9
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
       - name: Install Android SDK packages
+        shell: bash
         run: |
           set -e
-          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | sort -V | tail -1)
-          test -n "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses || true
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)
+          fi
+          test -n "$SDKMANAGER" && test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Unzip project
+      - name: Locate or extract project
         id: project
+        shell: bash
         run: |
           set -e
-          ZIP=$(find . -maxdepth 1 -name '*.zip' -print -quit)
-          test -n "$ZIP"
-          mkdir -p /tmp/rentvpn
-          unzip -q -o "$ZIP" -d /tmp/rentvpn
-          SETTINGS=$(find /tmp/rentvpn -name settings.gradle.kts -print -quit)
-          test -n "$SETTINGS"
-          echo "dir=$(dirname "$SETTINGS")" >> "$GITHUB_OUTPUT"
+          ROOT="$GITHUB_WORKSPACE"
+          PROJECT=""
 
-      - name: Download Xray
+          if [ -f "$ROOT/settings.gradle.kts" ] || [ -f "$ROOT/settings.gradle" ]; then
+            PROJECT="$ROOT"
+          else
+            ZIP="$ROOT/RENT_VPN_fixed.zip"
+            if [ ! -f "$ZIP" ]; then
+              ZIP=$(find "$ROOT" -maxdepth 1 -type f -iname '*.zip' -print | sort | head -n 1)
+            fi
+
+            if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
+              mkdir -p "$RUNNER_TEMP/rentvpn-project"
+              unzip -q -o "$ZIP" -d "$RUNNER_TEMP/rentvpn-project"
+
+              SETTINGS=$(find "$RUNNER_TEMP/rentvpn-project" -type f \( -name settings.gradle.kts -o -name settings.gradle \) -print -quit)
+
+              if [ -n "$SETTINGS" ]; then
+                PROJECT=$(dirname "$SETTINGS")
+              fi
+            fi
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Project not found"
+            find "$ROOT" -maxdepth 3 -type f | sort | head -n 100
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT/app/build.gradle.kts" ]; then
+            echo "ERROR: app/build.gradle.kts not found"
+            exit 1
+          fi
+
+          echo "dir=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "Project directory: $PROJECT"
+
+      - name: Download Xray library
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -e
           LIB="${{ steps.project.outputs.dir }}/app/libs"
           mkdir -p "$LIB"
-          gh release download --repo 2dust/AndroidLibXrayLite \
-            --pattern '*.aar' --dir "$LIB" --clobber
-          A=$(find "$LIB" -name '*.aar' -print -quit)
-          test -n "$A"
-          mv "$A" "$LIB/libv2ray.aar"
+          rm -f "$LIB"/*.aar
 
-      - name: Build APK
+          gh release download --repo 2dust/AndroidLibXrayLite \
+            --pattern 'libv2ray.aar' --dir "$LIB" --clobber
+
+          test -s "$LIB/libv2ray.aar"
+          ls -lh "$LIB/libv2ray.aar"
+
+      - name: Build debug APK
+        shell: bash
         run: |
           set -e
-          gradle -p "${{ steps.project.outputs.dir }}" :app:assembleDebug
-          cp "${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" RentVPN.apk
+          gradle -p "${{ steps.project.outputs.dir }}" :app:assembleDebug --stacktrace
 
-      - uses: actions/upload-artifact@v4
+          APK="${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+
+          cp "$APK" "$GITHUB_WORKSPACE/RentVPN-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/RentVPN-debug.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
           name: RENT-VPN-debug-apk
-          path: RentVPN.apk
+          path: RentVPN-debug.apk
+          if-no-files-found: error
 
-      - name: Publish Release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rentvpn-build-${{ github.run_number }}
           name: RentVPN build ${{ github.run_number }}
-          files: RentVPN.apk
+          files: RentVPN-debug.apk
+          fail_on_unmatched_files: true
           
